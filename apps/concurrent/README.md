@@ -61,8 +61,8 @@ streamed-delta count and a streamed-text token estimate, so `llama.cpp` is not
 undercounted when it streams one token per chunk and oMLX is not undercounted
 when it batches multiple tokens into one SSE chunk. TPS timing starts at the
 first streamed token to measure generation speed, while elapsed time remains
-full request wall time. Final token counts come from the OpenAI-compatible usage
-chunk when available.
+full request wall time. Final token counts and, when reported by the server,
+final generation TPS come from OpenAI-compatible usage or timing fields.
 
 If the server requires authentication, set `OPENAI_API_KEY` or pass `--api-key`.
 Specialist tasks default to `--max-tokens 2048`; override it when a scenario needs shorter or longer outputs.

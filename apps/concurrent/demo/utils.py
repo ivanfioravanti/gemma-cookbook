@@ -97,6 +97,28 @@ def _usage_to_dict(usage: object) -> dict:
         "total_tokens",
         "input_tokens",
         "output_tokens",
+        "predicted_n",
+        "n_predicted",
+        "tokens_predicted",
+        "predicted_tokens",
+        "generation_tokens_per_second",
+        "completion_tokens_per_second",
+        "output_tokens_per_second",
+        "tokens_per_second",
+        "predicted_per_second",
+        "predicted_tokens_per_second",
+        "tokens_predicted_per_second",
+        "generation_duration",
+        "completion_duration",
+        "output_duration",
+        "generation_ms",
+        "completion_ms",
+        "output_ms",
+        "predicted_ms",
+        "t_predicted_ms",
+        "t_token_generation",
+        "usage",
+        "timings",
     ):
         value = getattr(usage, field, None)
         if value is not None:
@@ -105,23 +127,99 @@ def _usage_to_dict(usage: object) -> dict:
     return data
 
 
-def _first_number(data: dict, *fields: str) -> float | None:
-    for field in fields:
+def _metric_sources(data: dict):
+    """Yield a metrics dict plus common nested server timing containers."""
+    yield data
+
+    for field in ("usage", "timings"):
         value = data.get(field)
         if value is None:
             continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
+        nested = value if isinstance(value, dict) else _usage_to_dict(value)
+        if not nested:
             continue
+        yield nested
+
+        timings = nested.get("timings")
+        if isinstance(timings, dict):
+            yield timings
+
+
+def _first_number(data: dict, *fields: str) -> float | None:
+    for field in fields:
+        for source in _metric_sources(data):
+            value = source.get(field)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
     return None
 
 
 def _extract_completion_tokens(usage: object) -> int | None:
     """Extract generated token count from an OpenAI-compatible usage object."""
     data = _usage_to_dict(usage)
-    tokens = _first_number(data, "completion_tokens", "output_tokens")
+    tokens = _first_number(
+        data,
+        "completion_tokens",
+        "output_tokens",
+        "predicted_n",
+        "n_predicted",
+        "tokens_predicted",
+        "predicted_tokens",
+    )
     return int(tokens) if tokens is not None else None
+
+
+def _extract_generation_tps(usage: object) -> float | None:
+    """Extract server-reported generation throughput when a backend provides it."""
+    data = _usage_to_dict(usage)
+    tps = _first_number(
+        data,
+        "generation_tokens_per_second",
+        "completion_tokens_per_second",
+        "output_tokens_per_second",
+        "tokens_per_second",
+        "predicted_per_second",
+        "predicted_tokens_per_second",
+        "tokens_predicted_per_second",
+    )
+    if tps is not None:
+        return tps
+
+    tokens = _first_number(
+        data,
+        "completion_tokens",
+        "output_tokens",
+        "predicted_n",
+        "n_predicted",
+        "tokens_predicted",
+        "predicted_tokens",
+    )
+    duration = _first_number(
+        data,
+        "generation_duration",
+        "completion_duration",
+        "output_duration",
+    )
+    if tokens is not None and duration and duration > 0:
+        return tokens / duration
+
+    duration_ms = _first_number(
+        data,
+        "generation_ms",
+        "completion_ms",
+        "output_ms",
+        "predicted_ms",
+        "t_predicted_ms",
+        "t_token_generation",
+    )
+    if tokens is not None and duration_ms and duration_ms > 0:
+        return tokens / (duration_ms / 1000)
+
+    return None
 
 
 def _estimate_generated_tokens(text: str) -> int:
@@ -172,6 +270,7 @@ def stream_llm(
     stream_delta_count = 0
     empty_chunk_count = 0
     server_tokens = None  # Will be set from usage if available
+    server_generation_tps = None  # Will be set from usage if available
     stopped_reason = None
     start_t = time.time()
     generation_start_t = None
@@ -199,11 +298,17 @@ def stream_llm(
             response = client.chat.completions.create(**request)
 
         for chunk in response:
+            # Some servers attach final usage/timing fields to the usage object;
+            # llama.cpp versions may put generation timings on the chunk itself.
+            chunk_tokens = _extract_completion_tokens(chunk)
+            if chunk_tokens is not None:
+                server_tokens = chunk_tokens
+            chunk_tps = _extract_generation_tps(chunk)
+            if chunk_tps is not None:
+                server_generation_tps = chunk_tps
+
             # Final chunk with usage stats (no choices)
             if hasattr(chunk, "usage") and chunk.usage:
-                usage_tokens = _extract_completion_tokens(chunk.usage)
-                if usage_tokens is not None:
-                    server_tokens = usage_tokens
                 continue
 
             if not chunk.choices:
@@ -282,7 +387,10 @@ def stream_llm(
         if generation_start_t is not None
         else total_elapsed
     )
-    final_tps = final_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
+    if server_generation_tps is not None:
+        final_tps = server_generation_tps
+    else:
+        final_tps = final_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
     write_metrics(agent_name, "done", final_tokens, total_elapsed, final_tps)
 
     return full
