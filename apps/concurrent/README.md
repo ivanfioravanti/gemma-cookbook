@@ -6,9 +6,10 @@ These Gemma 4 instances can be run across several scenarios, such as generating 
 
 ## Prerequisites
 
-- **macOS** (uses AppleScript for Terminal window management)
+- **macOS** (uses AppleScript for Terminal/iTerm2 window management)
 - **[uv](https://github.com/astral-sh/uv)** for package management
-- **llama-server** from [llama.cpp](https://github.com/ggml-org/llama.cpp) running on `localhost:8080`
+- An OpenAI-compatible chat completions server. By default, `run.sh` uses a local
+  [`llama-server`](https://github.com/ggml-org/llama.cpp) on `localhost:8080`.
 
 ## Quick Start
 
@@ -46,7 +47,25 @@ bash run.sh --scenario code --topic "FizzBuzz" --tasks 10
 bash run.sh --scenario ascii --topic "animals" --tasks 10
 ```
 
-This opens macOS Terminal windows in a grid: a dashboard on top, the orchestrator, and N Gemma 4 instances below.
+This opens terminal windows in a grid: a dashboard on top, the orchestrator, and N Gemma 4 instances below. If you launch it from iTerm2, it opens iTerm2 windows instead. With multiple external monitors attached, all windows are placed on the largest external display.
+
+To use another OpenAI-compatible server, point `run.sh` at its `/v1` base URL and pass the model name expected by that server:
+
+```bash
+bash run.sh --omlx --api-base http://127.0.0.1:10240/v1 --model my-model \
+  --scenario ascii --topic "animals" --tasks 10
+```
+
+The `--omlx` flag labels the dashboard as oMLX. Live TPS uses the larger of the
+streamed-delta count and a streamed-text token estimate, so `llama.cpp` is not
+undercounted when it streams one token per chunk and oMLX is not undercounted
+when it batches multiple tokens into one SSE chunk. TPS timing starts at the
+first streamed token to measure generation speed, while elapsed time remains
+full request wall time. Final token counts come from the OpenAI-compatible usage
+chunk when available.
+
+If the server requires authentication, set `OPENAI_API_KEY` or pass `--api-key`.
+Specialist tasks default to `--max-tokens 2048`; override it when a scenario needs shorter or longer outputs.
 
 ## Adding a New Scenario
 

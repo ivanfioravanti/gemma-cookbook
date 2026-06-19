@@ -12,6 +12,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -26,7 +27,13 @@ POLL_INTERVAL = 0.5
 
 # ─── Step 1: Plan ───────────────────────────────────────────
 
-def plan_tasks(api_url: str, scenario: dict, topic: str) -> list[dict]:
+def plan_tasks(
+    api_url: str,
+    scenario: dict,
+    topic: str,
+    model: str,
+    api_key: str | None,
+) -> list[dict]:
     """Use the LLM to generate specific instructions per agent."""
     agents = scenario["agents"]
     plan = scenario["plan"]
@@ -45,8 +52,15 @@ def plan_tasks(api_url: str, scenario: dict, topic: str) -> list[dict]:
         {"role": "system", "content": plan["system"]},
         {"role": "user", "content": user_prompt},
     ]
-    raw = stream_llm(api_url, messages, agent_name="orchestrator",
-                     color="1;36", max_tokens=plan_tokens)
+    raw = stream_llm(
+        api_url,
+        messages,
+        agent_name="orchestrator",
+        color="1;36",
+        max_tokens=plan_tokens,
+        model=model,
+        api_key=api_key,
+    )
     print("\n")
 
     # Extract JSON array (skip any reasoning preamble)
@@ -134,7 +148,14 @@ def collect(tasks: list[dict], agents: list[dict]) -> dict[str, str]:
 
 # ─── Step 4: Assemble ───────────────────────────────────────
 
-def assemble(scenario: dict, topic: str, results: dict, tasks: list = None):
+def server_slug(server_name: str) -> str:
+    """Turn a server display name into a filesystem-safe slug."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", server_name or "").strip("-").lower()
+    return slug or "server"
+
+
+def assemble(scenario: dict, topic: str, results: dict, tasks: list = None,
+             server_name: str = "server"):
     """Build the final HTML page from all agent results."""
     print(f"{CYAN}{'━' * 60}{RESET}")
     print(f"{CYAN}  🔧 STEP 3: ASSEMBLING{RESET}")
@@ -144,15 +165,23 @@ def assemble(scenario: dict, topic: str, results: dict, tasks: list = None):
     page_html = build_page(topic, scenario, results, tasks=tasks)
 
     os.makedirs(BUILD_DIR, exist_ok=True)
-    path = os.path.join(BUILD_DIR, "index.html")
+    # Remove any legacy single-file output so only per-server files remain.
+    legacy = os.path.join(BUILD_DIR, "index.html")
+    if os.path.exists(legacy):
+        os.remove(legacy)
+
+    filename = f"index_{server_slug(server_name)}.html"
+    path = os.path.join(BUILD_DIR, filename)
     with open(path, "w") as f:
         f.write(page_html)
 
-    print(f"  {GREEN}✅ Assembled: index.html{RESET}")
+    print(f"  {GREEN}✅ Assembled: {filename}{RESET}")
 
     try:
-        subprocess.run(["open", path], check=True)
-        print(f"  {GREEN}🌍 Opened in browser!{RESET}")
+        # -g opens in the background so the browser doesn't steal focus from
+        # the dashboard window (which is waiting for Enter to close children).
+        subprocess.run(["open", "-g", path], check=True)
+        print(f"  {GREEN}🌍 Opened in browser (background)!{RESET}")
     except Exception:
         pass
 
@@ -168,6 +197,10 @@ def main():
     parser.add_argument("--tasks", type=int, default=None,
                         help="Number of tasks/LLMs (default: scenario default)")
     parser.add_argument("--api-url", default="http://127.0.0.1:8080/v1/chat/completions")
+    parser.add_argument("--model", default="default")
+    parser.add_argument("--api-key", default=None)
+    parser.add_argument("--server-name", default="server",
+                        help="Server display name; names the output HTML file")
     args = parser.parse_args()
 
     scenario = get_scenario(args.scenario, n_agents=args.tasks)
@@ -178,20 +211,28 @@ def main():
     print(f"{CYAN}{'━' * 60}{RESET}")
     print(f"\n{WHITE}  Scenario:{RESET} {args.scenario}")
     print(f"{WHITE}  Topic:{RESET} {args.topic}")
+    print(f"{WHITE}  Model:{RESET} {args.model}")
     print(f"{DIM}  {len(agents)} agents{RESET}\n")
 
-    # Clean communication directories
-    for d in [COMMS_DIR, BUILD_DIR]:
-        if os.path.exists(d):
-            for f in os.listdir(d):
-                os.remove(os.path.join(d, f))
-        else:
-            os.makedirs(d)
+    # Clean the communication directory so stale task/result files don't leak
+    # into this run. Leave website_build/ alone so per-server HTML files from
+    # previous runs can be compared side by side.
+    if os.path.exists(COMMS_DIR):
+        for f in os.listdir(COMMS_DIR):
+            os.remove(os.path.join(COMMS_DIR, f))
+    else:
+        os.makedirs(COMMS_DIR)
 
-    tasks = plan_tasks(args.api_url, scenario, args.topic)
+    tasks = plan_tasks(
+        args.api_url,
+        scenario,
+        args.topic,
+        args.model,
+        args.api_key,
+    )
     dispatch(tasks, agents, system_prompt=scenario.get("system_prompt", ""))
     results = collect(tasks, agents)
-    assemble(scenario, args.topic, results, tasks=tasks)
+    assemble(scenario, args.topic, results, tasks=tasks, server_name=args.server_name)
 
     print(f"\n{CYAN}{'━' * 60}{RESET}")
     print(f"{CYAN}  ✅ COMPLETE{RESET}")

@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -48,6 +49,118 @@ STATUS_STYLE = {
     "done":    ("✅", "bold"),
     "error":   ("❌", "bold red"),
 }
+
+
+def read_window_state(path: str) -> list[dict]:
+    """Read window records written by run.sh."""
+    windows = []
+    if not path or not os.path.exists(path):
+        return windows
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t", 2)
+                if len(parts) != 3:
+                    continue
+                app, window_id, title = parts
+                try:
+                    window_id_int = int(window_id)
+                except ValueError:
+                    continue
+                windows.append({"app": app, "id": window_id_int, "title": title})
+    except OSError:
+        pass
+    return windows
+
+
+def run_osascript(script: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["osascript", "-e", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def close_window_by_id(terminal_app: str, window_id: int) -> bool:
+    # iTerm2 rejects `close ... saving no` as a syntax error; plain `close` works
+    # (and closes without a confirmation prompt even while a process is running).
+    close_stmt = "close w" if terminal_app == "iTerm2" else "close w saving no"
+    script = f'''
+tell application "{terminal_app}"
+    repeat with w in windows
+        if id of w is {window_id} then
+            {close_stmt}
+            return 1
+        end if
+    end repeat
+end tell
+return 0
+'''
+    result = run_osascript(script)
+    if result.returncode != 0:
+        print(f"Window cleanup failed for id {window_id}: {result.stderr.strip()}")
+        return False
+    return result.stdout.strip() == "1"
+
+
+def close_windows_by_title(terminal_app: str, run_id: str) -> int:
+    run_token = f"[{run_id}]"
+    close_stmt = "close w" if terminal_app == "iTerm2" else "close w saving no"
+
+    script = f'''
+tell application "{terminal_app}"
+    set closedCount to 0
+    repeat with i from (count of windows) to 1 by -1
+        try
+            set w to window i
+            set titleText to name of w
+            if titleText contains "{run_token}" then
+                if titleText does not contain "Dashboard" then
+                    {close_stmt}
+                    set closedCount to closedCount + 1
+                end if
+            end if
+        end try
+    end repeat
+end tell
+return closedCount
+'''
+    result = run_osascript(script)
+    if result.returncode != 0:
+        print(f"Window title cleanup failed: {result.stderr.strip()}")
+        return 0
+    try:
+        return int(result.stdout.strip() or "0")
+    except ValueError:
+        return 0
+
+
+def close_child_windows(terminal_app: str, run_id: str, window_state: str = ""):
+    """Close non-dashboard terminal windows tagged with this run id."""
+    if not run_id:
+        return
+
+    window_ids = [
+        w["id"]
+        for w in read_window_state(window_state)
+        if w.get("app") == terminal_app
+    ]
+    closed_count = 0
+    for window_id in window_ids:
+        if close_window_by_id(terminal_app, window_id):
+            closed_count += 1
+
+    if not window_ids:
+        closed_count += close_windows_by_title(terminal_app, run_id)
+
+    print(f"Closed {closed_count} child window(s).")
+    if window_state:
+        try:
+            os.remove(window_state)
+        except OSError:
+            pass
 
 
 def read_agent_metrics(agent_names: list[str]) -> dict[str, dict]:
@@ -95,7 +208,7 @@ def fetch_server_metrics(server_url: str) -> dict:
 
 # ─── Hero Panel (big t/s number) ───────────────────────────
 
-def build_hero(metrics: dict[str, dict], server_metrics: dict = None) -> Panel:
+def build_hero(metrics: dict[str, dict], server_name: str, server_metrics: dict = None) -> Panel:
     """Build the large hero panel with the total t/s prominently displayed.
 
     Sums per-agent t/s for live throughput. Uses server metrics for accurate token counts.
@@ -142,6 +255,7 @@ def build_hero(metrics: dict[str, dict], server_metrics: dict = None) -> Panel:
         Text(""),
         Align.center(big_text),
         Align.center(Text("tokens / sec", style="bold yellow")),
+        Align.center(Text(f"server: {server_name}", style="bright_cyan")),
         Text(""),
         Align.center(Text("~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~", style="dim cyan")),
         Text(""),
@@ -274,7 +388,12 @@ def build_agent_grid(agents: list[dict], metrics: dict[str, dict], n_cols: int =
 
 # ─── Combined Layout ──────────────────────────────────────
 
-def build_dashboard(agents: list[dict], metrics: dict[str, dict], server_metrics: dict = None) -> Layout:
+def build_dashboard(
+    agents: list[dict],
+    metrics: dict[str, dict],
+    server_name: str,
+    server_metrics: dict = None,
+) -> Layout:
     """Assemble the full dashboard layout.
 
     ┌──────────────┬──────────────────┐
@@ -292,7 +411,7 @@ def build_dashboard(agents: list[dict], metrics: dict[str, dict], server_metrics
         Layout(name="orchestrator", size=5),
         Layout(name="agents"),
     )
-    layout["hero"].update(build_hero(metrics, server_metrics))
+    layout["hero"].update(build_hero(metrics, server_name, server_metrics))
     layout["orchestrator"].update(build_orchestrator_panel(metrics))
     layout["agents"].update(build_agent_grid(agents, metrics))
     return layout
@@ -302,6 +421,11 @@ def main():
     parser = argparse.ArgumentParser(description="Real-time throughput dashboard")
     parser.add_argument("--server-url", default="http://127.0.0.1:8080",
                         help="llama-server base URL")
+    parser.add_argument("--server-name", default="llama.cpp",
+                        help="Display name for the OpenAI-compatible server")
+    parser.add_argument("--terminal-app", choices=["Terminal", "iTerm2"], default="Terminal")
+    parser.add_argument("--run-id", default="")
+    parser.add_argument("--window-state", default="")
     parser.add_argument("--scenario", default="translate")
     parser.add_argument("--topic", default="Generative AI")
     parser.add_argument("--tasks", type=int, default=None)
@@ -330,7 +454,7 @@ def main():
             now = time.time()
             metrics = read_agent_metrics(agent_names)
             server_metrics = fetch_server_metrics(args.server_url)
-            live.update(build_dashboard(agents, metrics, server_metrics))
+            live.update(build_dashboard(agents, metrics, args.server_name, server_metrics))
 
             # Exit once all agents are done for EXIT_DELAY seconds
             if metrics:
@@ -364,6 +488,7 @@ def main():
 
     summary_lines = [
         "[bold green]✅ All agents complete![/]\n",
+        f"  [bright_white]Server:[/] [bold]{args.server_name}[/]",
         f"  [bright_white]Total tokens generated:[/] [bold]{total_tokens}[/]",
         f"  [bright_white]Wall-clock time:[/] [bold]{total_time:.1f}s[/]",
         f"  [bright_white]Parallel throughput:[/] [bold bright_yellow]{sum_tps:.1f} t/s[/]",
@@ -381,7 +506,8 @@ def main():
         padding=(1, 2),
     ))
 
-    input("\nPress Enter to close...")
+    input("\nPress Enter to close child windows...")
+    close_child_windows(args.terminal_app, args.run_id, args.window_state)
 
 
 if __name__ == "__main__":

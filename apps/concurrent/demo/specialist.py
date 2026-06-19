@@ -5,7 +5,7 @@ Polls for a task file, calls the LLM, streams the response, writes the result.
 
 Usage:
     python specialist.py --name french --emoji "🇫🇷" --color "1;34" \
-        --api-url http://127.0.0.1:8080/v1/chat/completions
+        --api-url http://127.0.0.1:8080/v1/chat/completions --model default
 """
 
 import argparse
@@ -40,6 +40,9 @@ def main():
     parser.add_argument("--emoji", default="🤖")
     parser.add_argument("--color", default="1;37")
     parser.add_argument("--api-url", default="http://127.0.0.1:8080/v1/chat/completions")
+    parser.add_argument("--model", default="default")
+    parser.add_argument("--api-key", default=None)
+    parser.add_argument("--max-tokens", type=int, default=2048)
     args = parser.parse_args()
 
     color = args.color
@@ -65,7 +68,15 @@ def main():
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": instruction})
 
-    result = stream_llm(args.api_url, messages, agent_name=name, color=color)
+    result = stream_llm(
+        args.api_url,
+        messages,
+        agent_name=name,
+        color=color,
+        max_tokens=args.max_tokens,
+        model=args.model,
+        api_key=args.api_key,
+    )
 
     # Write result
     result_path = os.path.join(COMMS_DIR, f"result_{name}.json")
